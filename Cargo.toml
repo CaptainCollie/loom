@@ -2,5 +2,12 @@
 name = "loom"
 version = "0.1.0"
 edition = "2024"
+authors = ["Artur (@CaptainCollie)"]
+description = "Tool to create nested file and directory structures."
+homepage = "https://github.com/CaptainCollie/loom"
+repository = "https://github.com/CaptainCollie/loom"
+readme = "README.md"
+license = "Apache-2.0"
+categories = ["command-line-utilities"]
 
 [dependencies]
