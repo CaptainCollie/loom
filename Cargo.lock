@@ -691,6 +691,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ratatui",
+ "unicode-width",
 ]
 
 [[package]]

@@ -12,10 +12,15 @@ use crossterm::event::{
 };
 use ratatui::{
     DefaultTerminal, Frame,
-    style::{Modifier, Style, Stylize},
+    layout::{Constraint, Layout, Position},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, ListState},
+    widgets::{Block, List, ListItem, ListState, Paragraph},
 };
+
+use unicode_width::UnicodeWidthStr;
+
+use crate::files::create_file;
 
 #[derive(Debug)]
 pub(crate) struct App {
@@ -23,6 +28,8 @@ pub(crate) struct App {
     expanded: HashSet<PathBuf>,
     visible: Vec<TreeEntry>,
     list_state: ListState,
+    character_index: usize,
+    mode: Mode,
     exit: bool,
     error: Option<String>,
 }
@@ -34,6 +41,12 @@ struct TreeEntry {
     is_dir: bool,
 }
 
+#[derive(Debug)]
+enum Mode {
+    Navigation,
+    Create { name: String, directory: PathBuf },
+}
+
 impl App {
     pub(crate) fn new(base_dir: PathBuf) -> io::Result<Self> {
         let mut app = Self {
@@ -41,6 +54,8 @@ impl App {
             base_dir,
             visible: Vec::new(),
             list_state: ListState::default(),
+            character_index: 0,
+            mode: Mode::Navigation,
             exit: false,
             error: None,
         };
@@ -131,7 +146,10 @@ impl App {
             }
 
             if last_refresh.elapsed() >= refresh_interval {
-                self.error = self.rebuild_visible().err().map(|error| error.to_string());
+                let refresh_error = self.rebuild_visible().err().map(|error| error.to_string());
+                if matches!(self.mode, Mode::Navigation) || self.error.is_none() {
+                    self.error = refresh_error;
+                }
 
                 last_refresh = Instant::now();
             }
@@ -140,6 +158,15 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        let input_height = match &self.mode {
+            Mode::Navigation => 0,
+            Mode::Create { .. } => 4,
+        };
+
+        let [tree_area, input_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(input_height)])
+                .areas(frame.area());
+
         let items: Vec<ListItem> = self
             .visible
             .iter()
@@ -155,7 +182,97 @@ impl App {
             .highlight_symbol("> ")
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-        frame.render_stateful_widget(list, frame.area(), &mut self.list_state);
+        frame.render_stateful_widget(list, tree_area, &mut self.list_state);
+
+        if let Mode::Create { name, directory } = &self.mode {
+            let block = Block::bordered()
+                .title(" Create file ")
+                .title_bottom(" Enter - create | Esc - cancel ");
+            let inner = block.inner(input_area);
+            frame.render_widget(block.style(Style::default().fg(Color::Yellow)), input_area);
+            let [directory_area, name_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+            frame.render_widget(
+                Paragraph::new(format!("Current dir: {}", directory.display())).blue(),
+                directory_area,
+            );
+            if name_area.width > 0 && name_area.height > 0 {
+                let cursor_byte = self.byte_index();
+                let before_cursor = &name[..cursor_byte];
+                let max_cursor_x = usize::from(name_area.width - 1);
+                let mut start = 0;
+                for (index, _) in before_cursor.char_indices() {
+                    start = index;
+                    if before_cursor[start..].width() <= max_cursor_x {
+                        break;
+                    }
+                    start = cursor_byte;
+                }
+                let cursor_x = before_cursor[start..].width();
+                frame.render_widget(Paragraph::new(&name[start..]).blue(), name_area);
+                frame
+                    .set_cursor_position(Position::new(name_area.x + cursor_x as u16, name_area.y));
+            }
+        }
+    }
+
+    // ----------------------- INPUT -----------------------
+
+    fn delete_char(&mut self) {
+        if let Mode::Create { name, .. } = &mut self.mode {
+            let is_not_cursor_leftmost = self.character_index != 0;
+            if is_not_cursor_leftmost {
+                let current_index = self.character_index;
+                let from_left_to_current_index = current_index - 1;
+
+                let before_char_to_delete = name.chars().take(from_left_to_current_index);
+                let after_char_to_delete = name.chars().skip(current_index);
+
+                *name = before_char_to_delete.chain(after_char_to_delete).collect();
+                self.move_cursor_left();
+            }
+        }
+    }
+
+    fn move_cursor_left(&mut self) {
+        let cursor_moved_left = self.character_index.saturating_sub(1);
+        self.character_index = self.clamp_cursor(cursor_moved_left);
+    }
+
+    fn move_cursor_right(&mut self) {
+        let cursor_moved_right = self.character_index.saturating_add(1);
+        self.character_index = self.clamp_cursor(cursor_moved_right);
+    }
+
+    fn enter_char(&mut self, new_char: char) {
+        let index = self.byte_index();
+        if let Mode::Create { name, .. } = &mut self.mode {
+            name.insert(index, new_char);
+            self.move_cursor_right();
+        }
+    }
+
+    fn byte_index(&self) -> usize {
+        if let Mode::Create { name, .. } = &self.mode {
+            name.char_indices()
+                .map(|(i, _)| i)
+                .nth(self.character_index)
+                .unwrap_or(name.len())
+        } else {
+            0
+        }
+    }
+
+    fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
+        if let Mode::Create { name, .. } = &self.mode {
+            new_cursor_pos.clamp(0, name.chars().count())
+        } else {
+            0
+        }
+    }
+
+    const fn reset_cursor(&mut self) {
+        self.character_index = 0;
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -167,60 +284,129 @@ impl App {
         Ok(())
     }
 
+    // --------------------------------------------------------
+
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if matches!(
-            key_event.code,
-            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
-        ) {
+        if matches!(key_event.code, KeyCode::Char('c' | 'C'))
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.exit();
+            return;
+        }
+        if key_event
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return;
+        }
+        if matches!(self.mode, Mode::Navigation)
+            && matches!(
+                key_event.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+            )
+        {
             self.error = None;
         }
-        match key_event.code {
-            KeyCode::Char('c' | 'C') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.exit();
-            }
-            KeyCode::Char('q') | KeyCode::Char('Q') => self.exit(),
-            KeyCode::Left => {
-                if let Some((path, is_dir)) =
-                    self.selected_entry().map(|e| (e.path.clone(), e.is_dir))
-                {
-                    if is_dir && self.expanded.remove(&path) {
-                        if let Err(error) = self.rebuild_visible() {
-                            self.expanded.insert(path);
-                            self.error = Some(error.to_string());
+        match &self.mode {
+            Mode::Navigation => match key_event.code {
+                KeyCode::Char('q') | KeyCode::Char('Q') => self.exit(),
+                KeyCode::Char('f') => {
+                    if let Some(entry) = self.selected_entry() {
+                        let dir = if entry.is_dir {
+                            Some(entry.path.clone())
+                        } else {
+                            entry.path.parent().map(Path::to_path_buf)
+                        };
+
+                        if let Some(dir) = dir {
+                            self.reset_cursor();
+                            self.error = None;
+                            self.mode = Mode::Create {
+                                name: String::new(),
+                                directory: dir,
+                            }
                         }
-                    } else if let Some(parent) = path.parent()
-                        && let Some(parent_idx) = self.visible.iter().position(|e| e.path == parent)
-                    {
-                        self.list_state.select(Some(parent_idx));
                     }
                 }
-            }
-            KeyCode::Right => {
-                if let Some((path, true)) =
-                    self.selected_entry().map(|e| (e.path.clone(), e.is_dir))
-                {
-                    if self.expanded.insert(path.clone()) {
-                        if let Err(error) = self.rebuild_visible() {
-                            self.expanded.remove(&path);
-                            self.error = Some(error.to_string());
-                        }
-                    } else if let Some(index) = self.list_state.selected()
-                        && self
-                            .visible
-                            .get(index + 1)
-                            .is_some_and(|entry| entry.path.parent() == Some(path.as_path()))
+                KeyCode::Left => {
+                    if let Some((path, is_dir)) =
+                        self.selected_entry().map(|e| (e.path.clone(), e.is_dir))
                     {
-                        self.list_state.select(Some(index + 1));
+                        if is_dir && self.expanded.remove(&path) {
+                            if let Err(error) = self.rebuild_visible() {
+                                self.expanded.insert(path);
+                                self.error = Some(error.to_string());
+                            }
+                        } else if let Some(parent) = path.parent()
+                            && let Some(parent_idx) =
+                                self.visible.iter().position(|e| e.path == parent)
+                        {
+                            self.list_state.select(Some(parent_idx));
+                        }
                     }
                 }
-            }
-            KeyCode::Down => {
-                self.list_state.select_next();
-            }
-            KeyCode::Up => {
-                self.list_state.select_previous();
-            }
-            _ => {}
+                KeyCode::Right => {
+                    if let Some((path, true)) =
+                        self.selected_entry().map(|e| (e.path.clone(), e.is_dir))
+                    {
+                        if self.expanded.insert(path.clone()) {
+                            if let Err(error) = self.rebuild_visible() {
+                                self.expanded.remove(&path);
+                                self.error = Some(error.to_string());
+                            }
+                        } else if let Some(index) = self.list_state.selected()
+                            && self
+                                .visible
+                                .get(index + 1)
+                                .is_some_and(|entry| entry.path.parent() == Some(path.as_path()))
+                        {
+                            self.list_state.select(Some(index + 1));
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    self.list_state.select_next();
+                }
+                KeyCode::Up => {
+                    self.list_state.select_previous();
+                }
+                _ => {}
+            },
+            Mode::Create { name, directory } => match key_event.code {
+                KeyCode::Enter => match create_file(directory, name) {
+                    Ok(path) => {
+                        let directory = directory.clone();
+                        self.mode = Mode::Navigation;
+                        self.reset_cursor();
+                        self.error = None;
+                        self.expanded.insert(directory);
+                        match self.rebuild_visible() {
+                            Ok(()) => {
+                                let index =
+                                    self.visible.iter().position(|entry| entry.path == path);
+                                if let Some(index) = index {
+                                    self.list_state.select(Some(index));
+                                }
+                            }
+                            Err(error) => {
+                                self.error =
+                                    Some(format!("File created, but tree refresh failed: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) => self.error = Some(format!("{error:#}")),
+                },
+                KeyCode::Char(to_insert) => self.enter_char(to_insert),
+                KeyCode::Backspace => self.delete_char(),
+                KeyCode::Left => self.move_cursor_left(),
+                KeyCode::Right => self.move_cursor_right(),
+                KeyCode::Esc => {
+                    self.mode = Mode::Navigation;
+                    self.reset_cursor();
+                    self.error = None;
+                }
+                _ => {}
+            },
         }
     }
 

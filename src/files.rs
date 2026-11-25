@@ -7,6 +7,22 @@ use anyhow::{Context, Result, bail};
 
 use crate::parser::Node;
 
+pub(crate) fn create_file(directory: &Path, name: &str) -> Result<PathBuf> {
+    if name.trim().is_empty() || matches!(name, "." | "..") {
+        bail!("File name must not be empty, '.' or '..'");
+    }
+    if name.contains(['/', '\\', '\0']) {
+        bail!("Expected a single file name, got {:?}", name);
+    }
+    let target = safe_join(directory, name)?;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .with_context(|| format!("Failed to create file '{}'", target.display()))?;
+    Ok(target)
+}
+
 pub(crate) fn validate_tree(base: &Path, nodes: &[Node]) -> Result<()> {
     for node in nodes {
         match node {
