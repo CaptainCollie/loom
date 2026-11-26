@@ -12,15 +12,16 @@ use crossterm::event::{
 };
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout, Position},
+    layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::files::create_file;
+use crate::create_structure;
+use crate::files::{create_directory, create_file, delete_entry};
 
 #[derive(Debug)]
 pub(crate) struct App {
@@ -32,6 +33,7 @@ pub(crate) struct App {
     mode: Mode,
     exit: bool,
     error: Option<String>,
+    refresh_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -44,7 +46,24 @@ struct TreeEntry {
 #[derive(Debug)]
 enum Mode {
     Navigation,
-    Create { name: String, directory: PathBuf },
+    Create {
+        kind: CreateKind,
+        name: String,
+        directory: PathBuf,
+    },
+    ConfirmDelete {
+        path: PathBuf,
+        is_dir: bool,
+        index: usize,
+        confirm: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CreateKind {
+    File,
+    Directory,
+    Structure,
 }
 
 impl App {
@@ -58,6 +77,7 @@ impl App {
             mode: Mode::Navigation,
             exit: false,
             error: None,
+            refresh_error: None,
         };
         app.rebuild_visible()?;
         Ok(app)
@@ -146,10 +166,7 @@ impl App {
             }
 
             if last_refresh.elapsed() >= refresh_interval {
-                let refresh_error = self.rebuild_visible().err().map(|error| error.to_string());
-                if matches!(self.mode, Mode::Navigation) || self.error.is_none() {
-                    self.error = refresh_error;
-                }
+                self.refresh_tree();
 
                 last_refresh = Instant::now();
             }
@@ -157,15 +174,83 @@ impl App {
         Ok(())
     }
 
+    fn refresh_tree(&mut self) {
+        self.refresh_error = self.rebuild_visible().err().map(|error| error.to_string());
+    }
+
+    fn screen_layout(&self, screen: Rect) -> [Rect; 3] {
+        let footer_height = u16::try_from(self.key_hints(screen.width).len()).unwrap_or(u16::MAX);
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(footer_height),
+        ])
+        .areas(screen)
+    }
+
+    fn delete_dialog(&self, screen: Rect) -> Option<(Rect, Vec<Line<'static>>)> {
+        let Mode::ConfirmDelete { path, is_dir, .. } = &self.mode else {
+            return None;
+        };
+        let content = self.screen_layout(screen)[1];
+        let width = content.width.min(90);
+        // Both buttons must fit in full, in addition to the complete warning and path.
+        if width < 21 {
+            return None;
+        }
+        let warning = if *is_dir {
+            "The directory and ALL its contents will be deleted. No undo."
+        } else {
+            "This entry will be permanently deleted. No undo."
+        };
+        let mut lines = Vec::new();
+        for (text, style) in [
+            (path.display().to_string(), Style::default()),
+            (String::new(), Style::default()),
+            (warning.to_owned(), Style::default().fg(Color::Red)),
+        ] {
+            let mut line = String::new();
+            let mut used = 0;
+            for ch in text.chars() {
+                let cells = ch.width().unwrap_or(0);
+                if used + cells > usize::from(width - 2) {
+                    lines.push(Line::styled(std::mem::take(&mut line), style));
+                    used = 0;
+                }
+                line.push(ch);
+                used += cells;
+            }
+            lines.push(Line::styled(line, style));
+        }
+        let height = u16::try_from(lines.len().checked_add(3)?).ok()?;
+        if height > content.height {
+            return None;
+        }
+        Some((
+            Rect::new(
+                content.x + (content.width - width) / 2,
+                content.y + (content.height - height) / 2,
+                width,
+                height,
+            ),
+            lines,
+        ))
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
+        let hints = self.key_hints(frame.area().width);
+        let [header_area, content_area, footer_area] = self.screen_layout(frame.area());
+        frame.render_widget(Line::from("loom".cyan().bold()).centered(), header_area);
+        frame.render_widget(Paragraph::new(hints), footer_area);
+
         let input_height = match &self.mode {
-            Mode::Navigation => 0,
+            Mode::Navigation | Mode::ConfirmDelete { .. } => 0,
             Mode::Create { .. } => 4,
         };
 
         let [tree_area, input_area] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(input_height)])
-                .areas(frame.area());
+                .areas(content_area);
 
         let items: Vec<ListItem> = self
             .visible
@@ -173,8 +258,8 @@ impl App {
             .map(|entry| ListItem::new(entry.display_line.clone()))
             .collect();
 
-        let mut block = Block::bordered().title(" loom ");
-        if let Some(error) = &self.error {
+        let mut block = Block::bordered().title(self.base_dir.display().to_string());
+        if let Some(error) = self.error.as_ref().or(self.refresh_error.as_ref()) {
             block = block.title_bottom(Line::from(error.as_str()).red());
         }
         let list = List::new(items)
@@ -184,10 +269,19 @@ impl App {
 
         frame.render_stateful_widget(list, tree_area, &mut self.list_state);
 
-        if let Mode::Create { name, directory } = &self.mode {
-            let block = Block::bordered()
-                .title(" Create file ")
-                .title_bottom(" Enter - create | Esc - cancel ");
+        if let Mode::Create {
+            kind,
+            name,
+            directory,
+        } = &self.mode
+        {
+            let title = match kind {
+                CreateKind::File => " Create new file ",
+                CreateKind::Directory => " Create new dir ",
+                CreateKind::Structure => " Create structure ",
+            };
+            let block = Block::bordered().title(title);
+
             let inner = block.inner(input_area);
             frame.render_widget(block.style(Style::default().fg(Color::Yellow)), input_area);
             let [directory_area, name_area] =
@@ -214,6 +308,96 @@ impl App {
                     .set_cursor_position(Position::new(name_area.x + cursor_x as u16, name_area.y));
             }
         }
+        if matches!(self.mode, Mode::ConfirmDelete { .. }) {
+            let Some((area, lines)) = self.delete_dialog(frame.area()) else {
+                if let Mode::ConfirmDelete { confirm, .. } = &mut self.mode {
+                    *confirm = false;
+                }
+                frame.render_widget(Clear, content_area);
+                frame.render_widget(
+                    Paragraph::new("Enlarge the window to review deletion. Esc - cancel")
+                        .wrap(Wrap { trim: false })
+                        .yellow(),
+                    content_area,
+                );
+                return;
+            };
+            let confirm = matches!(self.mode, Mode::ConfirmDelete { confirm: true, .. });
+            let block = Block::bordered().title(" Delete permanently? ");
+            let inner = block.inner(area);
+            frame.render_widget(Clear, area);
+            frame.render_widget(block, area);
+            let [message_area, buttons_area] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+            frame.render_widget(Paragraph::new(lines), message_area);
+            let selected = Style::default().add_modifier(Modifier::REVERSED);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        " Cancel ",
+                        if confirm { Style::default() } else { selected },
+                    ),
+                    Span::raw("   "),
+                    Span::styled(
+                        " Delete ",
+                        if confirm { selected } else { Style::default() },
+                    ),
+                ])),
+                buttons_area,
+            );
+        }
+    }
+
+    fn key_hints(&self, width: u16) -> Vec<Line<'static>> {
+        let actions: &[(&str, &str)] = match self.mode {
+            Mode::Navigation => &[
+                ("Up/Down", "move"),
+                ("Left/Right", "collapse/expand"),
+                ("f", "file"),
+                ("d", "directory"),
+                ("s", "structure"),
+                ("Backspace", "delete"),
+                ("q", "quit"),
+                ("Ctrl+C", "quit"),
+            ],
+            Mode::Create { .. } => &[
+                ("Enter", "create"),
+                ("Esc", "cancel"),
+                ("Left/Right", "cursor"),
+                ("Backspace", "erase"),
+                ("Ctrl+C", "quit"),
+            ],
+            Mode::ConfirmDelete { .. } => &[
+                ("Left/Right", "choose"),
+                ("Enter", "confirm"),
+                ("Esc", "cancel"),
+                ("Ctrl+C", "quit"),
+            ],
+        };
+        let mut lines = Vec::new();
+        let mut spans = Vec::new();
+        let mut used = 0;
+        for &(key, description) in actions {
+            let action_width = key.width() + 1 + description.width();
+            if !spans.is_empty() && used + 3 + action_width > usize::from(width) {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                used = 0;
+            }
+            if !spans.is_empty() {
+                spans.push(Span::raw("   "));
+                used += 3;
+            }
+            spans.push(Span::styled(key, Style::default().fg(Color::Yellow).bold()));
+            spans.push(Span::styled(
+                format!(" {description}"),
+                Style::default().fg(Color::Gray),
+            ));
+            used += action_width;
+        }
+        if !spans.is_empty() {
+            lines.push(Line::from(spans));
+        }
+        lines
     }
 
     // ----------------------- INPUT -----------------------
@@ -253,21 +437,20 @@ impl App {
     }
 
     fn byte_index(&self) -> usize {
-        if let Mode::Create { name, .. } = &self.mode {
-            name.char_indices()
+        match &self.mode {
+            Mode::Create { name, .. } => name
+                .char_indices()
                 .map(|(i, _)| i)
                 .nth(self.character_index)
-                .unwrap_or(name.len())
-        } else {
-            0
+                .unwrap_or(name.len()),
+            _ => 0,
         }
     }
 
     fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
-        if let Mode::Create { name, .. } = &self.mode {
-            new_cursor_pos.clamp(0, name.chars().count())
-        } else {
-            0
+        match &self.mode {
+            Mode::Create { name, .. } => new_cursor_pos.clamp(0, name.chars().count()),
+            _ => 0,
         }
     }
 
@@ -279,52 +462,109 @@ impl App {
         if event::poll(Duration::from_millis(100))?
             && let Some(key) = event::read()?.as_key_press_event()
         {
-            self.handle_key_event(key);
+            let (width, height) = crossterm::terminal::size()?;
+            self.handle_key_event(key, Rect::new(0, 0, width, height));
         }
         Ok(())
     }
 
     // --------------------------------------------------------
 
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
+    fn handle_key_event(&mut self, key_event: KeyEvent, screen: Rect) {
         if matches!(key_event.code, KeyCode::Char('c' | 'C'))
             && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && !key_event.modifiers.contains(KeyModifiers::ALT)
         {
             self.exit();
             return;
         }
+        let text_input = matches!(self.mode, Mode::Create { .. })
+            && matches!(key_event.code, KeyCode::Char(ch) if !ch.is_control())
+            && (!key_event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                || key_event
+                    .modifiers
+                    .contains(KeyModifiers::CONTROL | KeyModifiers::ALT));
         if key_event
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && !text_input
         {
             return;
         }
-        if matches!(self.mode, Mode::Navigation)
-            && matches!(
+        if matches!(self.mode, Mode::ConfirmDelete { .. }) && self.delete_dialog(screen).is_none() {
+            if let Mode::ConfirmDelete { confirm, .. } = &mut self.mode {
+                *confirm = false;
+            }
+            if !matches!(key_event.code, KeyCode::Esc) {
+                return;
+            }
+        }
+        let acknowledges_error = match self.mode {
+            Mode::Navigation => matches!(
                 key_event.code,
-                KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
-            )
-        {
+                KeyCode::Char('q' | 'Q' | 'f' | 'd' | 's')
+                    | KeyCode::Backspace
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+            ),
+            Mode::Create { .. } => matches!(
+                key_event.code,
+                KeyCode::Char(_)
+                    | KeyCode::Backspace
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Enter
+                    | KeyCode::Esc
+            ),
+            Mode::ConfirmDelete { .. } => matches!(
+                key_event.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Esc
+            ),
+        };
+        if acknowledges_error {
             self.error = None;
         }
         match &self.mode {
             Mode::Navigation => match key_event.code {
                 KeyCode::Char('q') | KeyCode::Char('Q') => self.exit(),
-                KeyCode::Char('f') => {
+                KeyCode::Backspace => {
                     if let Some(entry) = self.selected_entry() {
-                        let dir = if entry.is_dir {
+                        if entry.path == self.base_dir {
+                            self.error = Some("Cannot delete the tree root".into());
+                        } else {
+                            self.mode = Mode::ConfirmDelete {
+                                path: entry.path.clone(),
+                                is_dir: entry.is_dir,
+                                index: self.list_state.selected().unwrap_or(0),
+                                confirm: false,
+                            };
+                            self.error = None;
+                        }
+                    }
+                }
+                KeyCode::Char(key @ ('f' | 'd' | 's')) => {
+                    if let Some(entry) = self.selected_entry() {
+                        let directory = if entry.is_dir {
                             Some(entry.path.clone())
                         } else {
                             entry.path.parent().map(Path::to_path_buf)
                         };
-
-                        if let Some(dir) = dir {
+                        if let Some(directory) = directory {
                             self.reset_cursor();
                             self.error = None;
                             self.mode = Mode::Create {
+                                kind: match key {
+                                    'f' => CreateKind::File,
+                                    'd' => CreateKind::Directory,
+                                    _ => CreateKind::Structure,
+                                },
                                 name: String::new(),
-                                directory: dir,
-                            }
+                                directory,
+                            };
                         }
                     }
                 }
@@ -372,31 +612,106 @@ impl App {
                 }
                 _ => {}
             },
-            Mode::Create { name, directory } => match key_event.code {
-                KeyCode::Enter => match create_file(directory, name) {
-                    Ok(path) => {
-                        let directory = directory.clone();
+            Mode::ConfirmDelete {
+                path,
+                index,
+                confirm,
+                ..
+            } => match key_event.code {
+                KeyCode::Esc => self.mode = Mode::Navigation,
+                KeyCode::Left | KeyCode::Right => {
+                    if let Mode::ConfirmDelete { confirm, .. } = &mut self.mode {
+                        *confirm = key_event.code == KeyCode::Right;
+                    }
+                }
+                KeyCode::Enter => {
+                    if *confirm {
+                        let path = path.clone();
+                        let index = *index;
+                        let result = delete_entry(&self.base_dir, &path);
+                        let deleted = result.is_ok();
+                        self.error = result.err().map(|error| format!("{error:#}"));
+                        if deleted {
+                            self.expanded.retain(|entry| !entry.starts_with(&path));
+                        }
                         self.mode = Mode::Navigation;
-                        self.reset_cursor();
-                        self.error = None;
-                        self.expanded.insert(directory);
                         match self.rebuild_visible() {
-                            Ok(()) => {
-                                let index =
-                                    self.visible.iter().position(|entry| entry.path == path);
-                                if let Some(index) = index {
-                                    self.list_state.select(Some(index));
+                            Ok(()) if deleted => {
+                                self.list_state
+                                    .select(Some(index.min(self.visible.len() - 1)));
+                            }
+                            Ok(()) => {}
+                            Err(error) => {
+                                let refresh_error = format!("Tree refresh failed: {error}");
+                                self.error = Some(match self.error.take() {
+                                    Some(message) => format!("{message}; {refresh_error}"),
+                                    None => refresh_error,
+                                });
+                            }
+                        }
+                    } else {
+                        self.mode = Mode::Navigation;
+                    }
+                }
+                _ => {}
+            },
+            Mode::Create {
+                kind,
+                name,
+                directory,
+            } => match key_event.code {
+                KeyCode::Enter => {
+                    let result = match kind {
+                        CreateKind::File => create_file(directory, name),
+                        CreateKind::Directory => create_directory(directory, name),
+                        CreateKind::Structure => {
+                            if name.trim().is_empty() {
+                                Err(anyhow::anyhow!("Structure pattern must not be empty"))
+                            } else {
+                                create_structure(directory, name, false).map(|()| directory.clone())
+                            }
+                        }
+                    };
+                    match result {
+                        Ok(path) => {
+                            let directory = directory.clone();
+                            self.mode = Mode::Navigation;
+                            self.reset_cursor();
+                            self.error = None;
+                            self.expanded.insert(directory);
+                            match self.rebuild_visible() {
+                                Ok(()) => {
+                                    let index =
+                                        self.visible.iter().position(|entry| entry.path == path);
+                                    if let Some(index) = index {
+                                        self.list_state.select(Some(index));
+                                    }
+                                }
+                                Err(error) => {
+                                    self.error = Some(format!(
+                                        "Entry created, but tree refresh failed: {error}"
+                                    ));
                                 }
                             }
-                            Err(error) => {
-                                self.error =
-                                    Some(format!("File created, but tree refresh failed: {error}"));
+                        }
+                        Err(error) => {
+                            let message = format!("{error:#}");
+                            if matches!(kind, CreateKind::Structure) {
+                                // A filesystem error may leave part of the structure created.
+                                if let Err(refresh_error) = self.rebuild_visible() {
+                                    self.error = Some(format!(
+                                        "{message}; tree refresh failed: {refresh_error}"
+                                    ));
+                                } else {
+                                    self.error = Some(message);
+                                }
+                            } else {
+                                self.error = Some(message);
                             }
                         }
                     }
-                    Err(error) => self.error = Some(format!("{error:#}")),
-                },
-                KeyCode::Char(to_insert) => self.enter_char(to_insert),
+                }
+                KeyCode::Char(to_insert) if !to_insert.is_control() => self.enter_char(to_insert),
                 KeyCode::Backspace => self.delete_char(),
                 KeyCode::Left => self.move_cursor_left(),
                 KeyCode::Right => self.move_cursor_right(),
