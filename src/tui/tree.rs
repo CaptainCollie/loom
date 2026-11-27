@@ -1,6 +1,8 @@
+use crate::tui::icons::icon_for;
+
 use super::App;
 use ratatui::{
-    style::Stylize,
+    style::Style,
     text::{Line, Span},
 };
 use std::{
@@ -17,9 +19,19 @@ pub(super) struct TreeEntry {
 impl App {
     pub(super) fn rebuild_visible(&mut self) -> io::Result<()> {
         let selected_path = self.selected_entry().map(|entry| entry.path.clone());
+
+        let icon = icon_for(
+            &self.base_dir,
+            true,
+            self.expanded.contains(&self.base_dir),
+            true,
+            &self.icon_theme,
+        );
+        let stylized_icon = Span::from(icon.glyph.to_string()).style(Style::from(icon.color));
+
         let mut visible = vec![TreeEntry {
             path: self.base_dir.clone(),
-            display_line: Line::from(" .".blue().bold()),
+            display_line: Line::from(vec![stylized_icon, Span::from(" .")]),
             is_dir: true,
         }];
 
@@ -55,19 +67,21 @@ impl App {
             let is_dir = entry.metadata()?.is_dir();
             let is_expanded = self.expanded.contains(&path);
 
-            let raw_name = entry.file_name().to_string_lossy().into_owned();
-            let styled_name = if is_dir {
-                Span::from(format!(" {raw_name}")).blue().bold()
-            } else {
-                Span::from(raw_name).gray()
-            };
+            let icon = icon_for(&path, is_dir, is_expanded, false, &self.icon_theme);
+            let stylized_icon = Span::from(icon.glyph.to_string()).style(Style::from(icon.color));
 
             let branch = if is_last { "└── " } else { "├── " };
             let tree_prefix = Span::from(format!("{prefix}{branch}"));
 
+            let raw_name = Span::from(entry.file_name().to_string_lossy().into_owned());
             visible.push(TreeEntry {
                 path: path.clone(),
-                display_line: Line::from(vec![tree_prefix, styled_name]),
+                display_line: Line::from(vec![
+                    tree_prefix,
+                    stylized_icon,
+                    Span::raw(" "),
+                    raw_name,
+                ]),
                 is_dir,
             });
 

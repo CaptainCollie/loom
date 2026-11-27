@@ -1,7 +1,14 @@
+mod folder_icons;
+mod icons;
 mod input;
 mod reader;
+mod svg_color;
+mod theme;
+mod theme_picker;
+mod theme_store;
 mod tree;
 mod ui;
+mod vsix;
 use std::{
     collections::HashSet,
     io,
@@ -15,6 +22,8 @@ use ratatui::{DefaultTerminal, layout::Rect, widgets::ListState};
 use crate::create_structure;
 use crate::files::{create_directory, create_file, delete_entry};
 use input::TextInput;
+use theme::IconTheme;
+use theme_store::{ThemeId, ThemeStartup, ThemeStore};
 use tree::TreeEntry;
 
 #[derive(Debug)]
@@ -27,6 +36,9 @@ pub(crate) struct App {
     exit: bool,
     error: Option<String>,
     refresh_error: Option<String>,
+    theme_store: ThemeStore,
+    icon_theme: IconTheme,
+    selected_theme: Option<ThemeId>,
 }
 
 #[derive(Debug)]
@@ -44,6 +56,7 @@ enum Mode {
         confirm: bool,
     },
     Read(Box<reader::Reader>),
+    ThemePicker(theme_picker::ThemePicker),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +67,11 @@ enum CreateKind {
 }
 
 impl App {
-    pub(crate) fn new(base_dir: PathBuf) -> io::Result<Self> {
+    pub(crate) fn new(base_dir: PathBuf) -> anyhow::Result<Self> {
+        Ok(Self::with_themes(base_dir, ThemeStore::open()?)?)
+    }
+
+    fn with_themes(base_dir: PathBuf, themes: ThemeStartup) -> io::Result<Self> {
         let mut app = Self {
             expanded: HashSet::from([base_dir.clone()]),
             base_dir,
@@ -62,8 +79,11 @@ impl App {
             list_state: ListState::default(),
             mode: Mode::Navigation,
             exit: false,
-            error: None,
+            error: themes.warning,
             refresh_error: None,
+            theme_store: themes.store,
+            icon_theme: themes.theme,
+            selected_theme: themes.selected,
         };
         app.rebuild_visible()?;
         Ok(app)
@@ -76,6 +96,7 @@ impl App {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
             self.poll_reader();
+            self.poll_themes();
             self.handle_events()?;
 
             if self.exit {
@@ -136,7 +157,7 @@ impl App {
         let acknowledges_error = match &self.mode {
             Mode::Navigation => matches!(
                 key_event.code,
-                KeyCode::Char('q' | 'Q' | 'f' | 'd' | 's')
+                KeyCode::Char('q' | 'Q' | 'f' | 'd' | 's' | 't')
                     | KeyCode::Backspace
                     | KeyCode::Left
                     | KeyCode::Right
@@ -160,6 +181,7 @@ impl App {
             Mode::Read(_) => {
                 matches!(key_event.code, KeyCode::Up | KeyCode::Down | KeyCode::Esc)
             }
+            Mode::ThemePicker(_) => false,
         };
         if acknowledges_error {
             self.error = None;
@@ -169,6 +191,7 @@ impl App {
             Mode::Create { .. } => self.handle_create_key(key_event),
             Mode::ConfirmDelete { .. } => self.handle_delete_key(key_event, screen),
             Mode::Read(_) => self.handle_read_key(key_event),
+            Mode::ThemePicker(_) => self.handle_theme_key(key_event),
         }
     }
 
@@ -179,6 +202,7 @@ impl App {
             KeyCode::Char('f') => self.begin_creation(CreateKind::File),
             KeyCode::Char('d') => self.begin_creation(CreateKind::Directory),
             KeyCode::Char('s') => self.begin_creation(CreateKind::Structure),
+            KeyCode::Char('t') => self.begin_theme_selection(),
             KeyCode::Left => {
                 if let Some((path, is_dir)) =
                     self.selected_entry().map(|e| (e.path.clone(), e.is_dir))
@@ -397,6 +421,7 @@ impl App {
     }
 
     fn exit(&mut self) {
+        self.theme_store.cancel();
         self.exit = true;
     }
 }

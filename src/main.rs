@@ -25,7 +25,8 @@ fn run(matches: &ArgMatches) -> Result<()> {
     if let Some(pattern) = matches.get_one::<String>("pattern") {
         create_structure(".", pattern, dry_run)?;
     } else {
-        ratatui::run(|terminal| tui::App::new(std::env::current_dir()?)?.run(terminal))?;
+        let mut app = tui::App::new(std::env::current_dir()?)?;
+        ratatui::run(|terminal| app.run(terminal))?;
     }
 
     Ok(())

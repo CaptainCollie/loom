@@ -1,0 +1,80 @@
+{
+  "asset_fallbacks": [
+    {
+      "asset": "./icons/kotlin.svg",
+      "reason": "no_usable_literal_paint",
+      "unsupported_paints": [
+        "url(#a)"
+      ]
+    },
+    {
+      "asset": "./icons/liara.svg",
+      "reason": "no_usable_literal_paint",
+      "unsupported_paints": [
+        "url(#a)",
+        "url(#b)",
+        "url(#c)"
+      ]
+    },
+    {
+      "asset": "./icons/maven.svg",
+      "reason": "no_usable_literal_paint",
+      "unsupported_paints": [
+        "url(#a)"
+      ]
+    },
+    {
+      "asset": "./icons/pm2-ecosystem.svg",
+      "reason": "no_usable_literal_paint",
+      "unsupported_paints": [
+        "url(#a)",
+        "url(#b)",
+        "url(#c)"
+      ]
+    }
+  ],
+  "counts": {
+    "colors": 674,
+    "directory_colors": 4659,
+    "file_stems": 9416,
+    "file_suffixes": 1381
+  },
+  "fallback_color": "#7E8EA8",
+  "fallback_type_associations": {
+    "git": {
+      "file_stems": 46,
+      "file_suffixes": 1
+    },
+    "kotlin": {
+      "file_stems": 0,
+      "file_suffixes": 2
+    },
+    "liara": {
+      "file_stems": 7,
+      "file_suffixes": 0
+    },
+    "maven": {
+      "file_stems": 15,
+      "file_suffixes": 0
+    },
+    "pm2-ecosystem": {
+      "file_stems": 30,
+      "file_suffixes": 0
+    },
+    "template": {
+      "file_stems": 0,
+      "file_suffixes": 1
+    }
+  },
+  "heuristic": "First literal chromatic fill/stroke in SVG document order, including inline styles; otherwise first neutral other than pure white/black; otherwise #7E8EA8. Hex RGB/RGBA supported; alpha ignored.",
+  "license": "Apache-2.0",
+  "missing_file_icon_types": [
+    "git",
+    "template"
+  ],
+  "revision": "95cc434119c669e0ff65a6bccfd026ec70e16b63",
+  "source": "https://github.com/zed-extensions/material-icon-theme",
+  "source_archive": "https://codeload.github.com/zed-extensions/material-icon-theme/zip/95cc434119c669e0ff65a6bccfd026ec70e16b63",
+  "source_theme": "https://github.com/zed-extensions/material-icon-theme/blob/95cc434119c669e0ff65a6bccfd026ec70e16b63/icon_themes/material-icon-theme.json",
+  "unique_svg_assets_read": 942
+}

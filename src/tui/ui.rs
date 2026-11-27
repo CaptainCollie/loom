@@ -119,6 +119,7 @@ impl App {
             self.draw_tree(frame, tree_area);
             self.draw_create_input(frame, input_area);
             self.draw_delete_dialog(frame, content_area);
+            self.draw_theme_picker(frame, content_area);
         }
     }
 
@@ -136,7 +137,7 @@ impl App {
         let list = List::new(items)
             .block(block)
             .highlight_symbol("> ")
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            .highlight_style(Style::default().bg(Color::White));
 
         frame.render_stateful_widget(list, tree_area, &mut self.list_state);
     }
@@ -233,6 +234,7 @@ impl App {
                 ("f", "file"),
                 ("d", "directory"),
                 ("s", "structure"),
+                ("t", "theme"),
                 ("Enter", "read"),
                 ("Backspace", "delete"),
                 ("q", "quit"),
@@ -254,6 +256,12 @@ impl App {
             Mode::Read(reader) if reader.prompt.is_some() => PROMPT_HINTS,
             Mode::Read(reader) if reader.viewer.busy => BUSY_HINTS,
             Mode::Read(_) => READ_HINTS,
+            Mode::ThemePicker(_) => &[
+                ("Up/Down", "choose"),
+                ("Enter", "apply"),
+                ("Esc", "cancel"),
+                ("Ctrl+C", "quit"),
+            ],
         };
         hint_lines(actions, width)
     }
