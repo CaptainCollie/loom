@@ -38,7 +38,7 @@ pub(crate) fn delete_entry(base: &Path, target: &Path) -> Result<()> {
             target.display()
         );
     }
-    // Resolve the parent, not the target: deleting a link must preserve its target.
+
     let parent = target
         .parent()
         .context("Missing parent directory")?

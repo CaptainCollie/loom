@@ -6,6 +6,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command, crate_description, crate_version
 mod files;
 mod parser;
 mod tui;
+mod viewer;
 
 use parser::parse;
 
@@ -39,6 +40,7 @@ fn main() {
         )
         .arg(
             Arg::new("dry-run")
+                .requires("pattern")
                 .short('d')
                 .long("dry-run")
                 .action(ArgAction::SetTrue)
