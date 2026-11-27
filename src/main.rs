@@ -5,6 +5,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command, crate_description, crate_version
 
 mod files;
 mod parser;
+mod syntax;
+mod theme_archive;
 mod tui;
 mod viewer;
 

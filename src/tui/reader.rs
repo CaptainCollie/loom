@@ -22,6 +22,7 @@ pub(super) struct Reader {
     pub(super) viewer: Viewer,
     pub(super) prompt: Option<Prompt>,
     desired: (usize, usize),
+    pub(super) syntax_picker: Option<super::syntax_picker::Picker>,
 }
 
 impl App {
@@ -38,12 +39,17 @@ impl App {
             return;
         }
         let path = entry.path.clone();
+        self.ensure_syntax_catalog();
         match Viewer::open(path) {
-            Ok(viewer) => {
+            Ok(mut viewer) => {
+                if let Some(catalog) = &self.syntax_catalog {
+                    viewer.set_syntax_theme(catalog.theme.clone());
+                }
                 self.mode = Mode::Read(Box::new(Reader {
                     viewer,
                     prompt: None,
                     desired: (0, 0),
+                    syntax_picker: None,
                 }))
             }
             Err(error) => self.error = Some(error.to_string()),
@@ -51,6 +57,7 @@ impl App {
     }
 
     pub(super) fn poll_reader(&mut self) {
+        self.poll_syntax_catalog();
         let Mode::Read(reader) = &mut self.mode else {
             return;
         };
@@ -71,6 +78,10 @@ impl App {
     }
 
     pub(super) fn handle_read_key(&mut self, key: KeyEvent) {
+        if matches!(&self.mode,Mode::Read(reader) if reader.syntax_picker.is_some()) {
+            self.handle_syntax_key(key);
+            return;
+        }
         let Mode::Read(reader) = &mut self.mode else {
             return;
         };
@@ -122,9 +133,16 @@ impl App {
             if reader.viewer.busy {
                 reader.viewer.cancel();
             } else {
+                if let Some(catalog) = &self.syntax_catalog {
+                    catalog.cancel();
+                }
                 self.mode = Mode::Navigation;
                 self.refresh_tree();
             }
+            return;
+        }
+        if key.code == KeyCode::Char('t') {
+            self.begin_syntax_selection();
             return;
         }
         if reader.viewer.busy || reader.viewer.invalidated {
@@ -191,6 +209,7 @@ impl App {
                 .viewer
                 .message
                 .clone()
+                .or_else(|| reader.viewer.syntax_message.clone())
                 .unwrap_or_else(|| format!("Line {} / {total}", view.selected))
         };
         let block = Block::bordered()
@@ -198,6 +217,17 @@ impl App {
             .title_bottom(status);
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        let palette = reader.viewer.syntax_theme.as_deref();
+        let background = palette.map(crate::syntax::background);
+        let base_style = palette.map_or(Style::default(), |theme| {
+            let bg = crate::syntax::background(theme);
+            let mut style = Style::default().bg(crate::syntax::rgb(bg, bg));
+            if let Some(fg) = theme.settings.foreground {
+                style = style.fg(crate::syntax::rgb(fg, bg));
+            }
+            style
+        });
+        frame.render_widget(Block::default().style(base_style), inner);
         // Keep the page stable when opening or closing a command prompt.
         let [text_area, prompt_area] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
@@ -224,9 +254,14 @@ impl App {
                 let y = text_area.y + index as u16;
                 let current = row.number == page.view.selected;
                 let style = if current {
-                    Style::default().bg(Color::DarkGray)
+                    palette
+                        .and_then(|theme| theme.settings.line_highlight)
+                        .zip(background)
+                        .map_or(base_style.bg(Color::DarkGray), |(color, bg)| {
+                            base_style.bg(crate::syntax::rgb(color, bg))
+                        })
                 } else {
-                    Style::default()
+                    base_style
                 };
                 frame.render_widget(
                     Block::default().style(style),
@@ -238,22 +273,39 @@ impl App {
                         .style(if current {
                             style.fg(Color::Yellow).bold()
                         } else {
-                            style.fg(Color::Gray)
+                            palette
+                                .and_then(|theme| theme.settings.gutter_foreground)
+                                .zip(background)
+                                .map_or(style.fg(Color::Gray), |(color, bg)| {
+                                    style.fg(crate::syntax::rgb(color, bg))
+                                })
                         }),
                     Rect::new(numbers_area.x, y, numbers_area.width.saturating_sub(1), 1),
                 );
-                let line = if let Some(range) = &row.highlight {
-                    Line::from(vec![
-                        Span::raw(&row.text[..range.start]),
-                        Span::styled(
-                            &row.text[range.clone()],
-                            Style::default().fg(Color::Black).bg(Color::Yellow),
-                        ),
-                        Span::raw(&row.text[range.end..]),
-                    ])
-                } else {
-                    Line::from(row.text.as_str())
-                };
+                let ranges = reader
+                    .viewer
+                    .syntax_page
+                    .as_ref()
+                    .filter(|syntax| std::sync::Arc::ptr_eq(&syntax.page, page))
+                    .and_then(|syntax| syntax.rows.get(index))
+                    .map_or(&[][..], Vec::as_slice);
+                let mut search = Style::default().fg(Color::Black).bg(Color::Yellow);
+                if let (Some(theme), Some(bg)) = (palette, background) {
+                    if let Some(color) = theme.settings.find_highlight {
+                        search = search.bg(crate::syntax::rgb(color, bg));
+                    }
+                    if let Some(color) = theme.settings.find_highlight_foreground {
+                        search = search.fg(crate::syntax::rgb(color, bg));
+                    }
+                }
+                let line = styled_line(
+                    &row.text,
+                    ranges,
+                    row.highlight.as_ref(),
+                    style,
+                    search,
+                    current,
+                );
                 frame.render_widget(
                     Paragraph::new(line).style(style),
                     Rect::new(body_area.x, y, body_area.width, 1),
@@ -286,4 +338,46 @@ impl App {
             }
         }
     }
+}
+
+fn styled_line<'a>(
+    text: &'a str,
+    ranges: &[crate::syntax::StyledRange],
+    hit: Option<&std::ops::Range<usize>>,
+    base: Style,
+    search: Style,
+    current: bool,
+) -> Line<'a> {
+    let mut boundaries = vec![0, text.len()];
+    for range in ranges {
+        boundaries.extend([range.bytes.start, range.bytes.end]);
+    }
+    if let Some(hit) = hit {
+        boundaries.extend([hit.start, hit.end]);
+    }
+    boundaries.retain(|&at| at <= text.len() && text.is_char_boundary(at));
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut spans = Vec::new();
+    let mut index = 0;
+    for pair in boundaries.windows(2) {
+        while index < ranges.len() && ranges[index].bytes.end <= pair[0] {
+            index += 1;
+        }
+        let mut style = base;
+        if let Some(range) = ranges
+            .get(index)
+            .filter(|range| range.bytes.start <= pair[0])
+        {
+            style = style.patch(range.style);
+        }
+        if current {
+            style.bg = base.bg;
+        }
+        if hit.is_some_and(|hit| hit.start < pair[1] && hit.end > pair[0]) {
+            style = style.patch(search);
+        }
+        spans.push(Span::styled(&text[pair[0]..pair[1]], style));
+    }
+    Line::from(spans)
 }

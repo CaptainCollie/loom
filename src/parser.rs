@@ -11,10 +11,20 @@ pub(crate) enum Node {
 }
 
 pub(crate) fn parse(input: &str) -> Result<Vec<Node>> {
-    let mut chars = input.chars().peekable();
+    let mut chars = input.trim().chars().peekable();
+    let grouped = chars.next_if_eq(&'{').is_some();
     let nodes = parse_list(&mut chars, 0)?;
-    if chars.peek().is_some() {
+    if grouped && chars.next() != Some('}') {
+        bail!("Unclosed opening brace '{{'");
+    }
+    while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+        chars.next();
+    }
+    if chars.peek() == Some(&'}') {
         bail!("Unexpected closing brace '}}'");
+    }
+    if chars.peek().is_some() {
+        bail!("Unexpected content after root group");
     }
     Ok(nodes)
 }

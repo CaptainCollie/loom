@@ -42,6 +42,13 @@ pub(crate) struct Row {
     pub number: u64,
     pub text: String,
     pub highlight: Option<Range<usize>>,
+    pub mapping: Vec<DisplayRange>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DisplayRange {
+    pub source: Range<u64>,
+    pub display: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +268,7 @@ impl Source {
                         number: token.line,
                         text: String::new(),
                         highlight: None,
+                        mapping: Vec::new(),
                     });
                 }
                 if token.ch == '\n' {
@@ -295,6 +303,22 @@ impl Source {
                 if let Some(row) = rows.last_mut() {
                     let begin = row.text.len();
                     row.text.push_str(&text);
+                    let display = begin..row.text.len();
+                    if let Some(previous) = row.mapping.last_mut()
+                        && previous.source.end == token.offset
+                        && previous.display.end == begin
+                        && previous.source.end - previous.source.start
+                            == (previous.display.end - previous.display.start) as u64
+                        && token.end - token.offset == text.len() as u64
+                    {
+                        previous.source.end = token.end;
+                        previous.display.end = row.text.len();
+                    } else {
+                        row.mapping.push(DisplayRange {
+                            source: token.offset..token.end,
+                            display,
+                        });
+                    }
                     if view.hit.as_ref().is_some_and(|hit| {
                         token.grapheme.start < hit.bytes.end && token.grapheme.end > hit.bytes.start
                     }) {
@@ -324,6 +348,7 @@ impl Source {
                     number: view.top,
                     text: String::new(),
                     highlight: None,
+                    mapping: Vec::new(),
                 });
             }
         }

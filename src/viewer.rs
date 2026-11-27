@@ -20,11 +20,16 @@ pub(crate) struct Viewer {
     pub viewport: (usize, usize),
     client: Client,
     request_id: u64,
+    syntax: crate::syntax::Client,
+    pub syntax_theme: Option<Arc<syntect::highlighting::Theme>>,
+    pub syntax_page: Option<crate::syntax::HighlightedPage>,
+    pub syntax_message: Option<String>,
 }
 
 impl Viewer {
     pub fn open(path: PathBuf) -> std::io::Result<Self> {
         let client = Client::start(path.clone())?;
+        let syntax = crate::syntax::Client::start(path.clone())?;
         Ok(Self {
             path,
             page: None,
@@ -35,6 +40,10 @@ impl Viewer {
             viewport: (0, 0),
             client,
             request_id: 0,
+            syntax,
+            syntax_theme: Some(crate::syntax::themes::builtin()),
+            syntax_page: None,
+            syntax_message: None,
         })
     }
 
@@ -65,16 +74,58 @@ impl Viewer {
                 Ok(Some(page)) => {
                     self.message = page.notice.clone();
                     self.page = Some(page);
+                    self.request_syntax();
                 }
-                Ok(None) => self.message = Some("No match before the file boundary".into()),
+                Ok(None) => {
+                    self.message = Some("No match before the file boundary".into());
+                    self.request_syntax();
+                }
                 Err(error) => {
                     self.invalidated = true;
+                    self.syntax.cancel();
+                    self.syntax_page = None;
                     self.message = Some(format!("{error}. Close and reopen the file."));
                     return self.page.is_none();
                 }
             }
         }
+        if let Some(result) = self.syntax.poll() {
+            match result {
+                Ok(page)
+                    if self
+                        .page
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &page.page)) =>
+                {
+                    self.syntax_message = page.notice.clone();
+                    self.syntax_page = Some(page);
+                }
+                Ok(_) => {}
+                Err(error) => self.syntax_message = Some(error),
+            }
+        }
         false
+    }
+
+    pub fn set_syntax_theme(&mut self, theme: Option<Arc<syntect::highlighting::Theme>>) {
+        self.syntax_page = None;
+        self.syntax_theme = theme;
+        self.request_syntax();
+    }
+
+    fn request_syntax(&mut self) {
+        if let (Some(page), Some(highlighted)) = (&self.page, &mut self.syntax_page)
+            && Arc::ptr_eq(&page.rows, &highlighted.page.rows)
+        {
+            highlighted.page = page.clone();
+            return;
+        }
+        self.syntax.cancel();
+        self.syntax_page = None;
+        self.syntax_message = None;
+        if let (Some(page), Some(theme)) = (&self.page, &self.syntax_theme) {
+            self.syntax.request(page.clone(), theme.clone());
+        }
     }
 
     fn send(&mut self, command: Command) {
@@ -82,6 +133,7 @@ impl Viewer {
             return;
         }
         self.message = None;
+        self.syntax.cancel();
         self.busy = true;
         self.request_id = self.client.request(command);
     }
@@ -109,6 +161,7 @@ impl Viewer {
 
     pub fn cancel(&mut self) {
         self.client.cancel();
+        self.syntax.cancel();
         self.busy = false;
         self.message = Some("Cancelled".into());
     }

@@ -4,8 +4,18 @@
 
 ## WORK IN PROGRESS
 
+Create entries directly in the current directory with a root group:
+
+```sh
+loom "{new.rs, new/{new1.rs, new2.rs}}"
+```
+
+The outer braces are optional: `loom "new.rs, new/{new1.rs, new2.rs}"`
+creates the same structure. Add `--dry-run` to preview it without creating files.
+
 Run `loom` without a pattern to open the interactive file tree. Press `t` to
-choose an icon color theme, `Enter` to apply it, or `Esc` to cancel. Opening
+choose an icon color theme in the tree, or a syntax color theme while reading
+a file. Press `Enter` to apply it, or `Esc` to cancel. Opening
 the theme menu again refreshes the list. File icons use Nerd Fonts; configure
 your terminal to use a compatible font.
 
@@ -57,15 +67,40 @@ and do not replace the active theme. No editor installation or runtime
 network connection is required. Running a structure pattern does not load
 themes.
 
-### Maintaining the built-in theme
+## Syntax highlighting
 
-The Python converter is a development tool for regenerating the bundled
-Material data from its pinned local Zed source tree:
+Open a file with `Enter`. Loom detects its language from the filename,
+extension, or shebang and highlights it with the built-in
+`base16-ocean.dark` scheme. Supported grammars include Rust, Python,
+JavaScript/TypeScript, JSON, TOML, YAML, Markdown, and shell. Unknown files
+remain plain text. Highlighting is powered by syntect and two-face's embedded
+grammars; no editor or language server is required.
 
-```sh
-python tools/prepare_icon_theme.py path/to/material-icon-theme-source
-```
+To add colors, place a **color-theme VSIX** (for example, Catppuccin or One
+Dark Pro) in the same `loom/themes` directory as icon packages. While reading,
+press `t`, choose a variant, and press `Enter`. `No highlighting` disables
+syntax colors. Esc closes the menu without changing the active theme.
+Reopen the menu to discover added or replaced packages. The file position,
+horizontal scroll, and search are preserved. Syntax selection is remembered
+separately in `.selected-syntax-theme.json`; icon selection is independent.
 
-Preparation requires Python 3.10+; normal builds and runtime do not. Source
-revisions, color-conversion limitations, and licenses are recorded in
-`assets/icon-themes/`.
+Color packages use `contributes.themes`. JSONC, local `include` chains, and
+TextMate `tokenColors` (including a packaged `.tmTheme` file) are supported.
+Only the reading area's palette and token rules are applied. Semantic tokens,
+language grammars from extensions, and the rest of VS Code's UI colors are
+not imported, so rendering can differ from VS Code. Includes stay inside
+the package, with cycle detection and a 16-file depth limit.
+
+Text is displayed before syntax results are ready. A separate worker restores
+multiline context from cached states; it never delays file navigation or
+search. Syntax colors are applied first, the current line background next,
+and search matches last. Tabs, Unicode, and horizontal clipping share the
+text reader's source-to-display mapping.
+
+Highlighting has its own limits: 64 KiB per source line, 8 MiB of context per
+request, 8 MiB of style ranges, and 128 checkpoint positions including the
+start. States are saved every 256 lines. A soft two-second budget is checked
+between lines; an individual regex call cannot be interrupted. On a limit or
+highlighting error, Loom shows plain text and a short notice. After an
+oversized line it does not guess the missing multiline state. There is no
+limit on total file size. Closing the file cancels pending highlighting.

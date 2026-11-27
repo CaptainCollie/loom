@@ -1,3 +1,6 @@
 /target
 /docs/
 /tree
+/tools/
+/assets/icon-themes/*
+!/assets/icon-themes/material.json

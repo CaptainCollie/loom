@@ -63,6 +63,9 @@ enum SavedSelection {
 }
 
 impl ThemeStore {
+    pub(super) fn directory(&self) -> &Path {
+        &self.directory
+    }
     pub fn open() -> Result<ThemeStartup> {
         let directory = dirs::config_dir()
             .context("Cannot locate the configuration directory")?

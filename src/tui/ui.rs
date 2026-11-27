@@ -16,6 +16,7 @@ const READ_HINTS: &[(&str, &str)] = &[
     ("g", "go to line"),
     ("/", "search"),
     ("n/N", "next/previous"),
+    ("t", "syntax theme"),
     ("Esc", "back"),
     ("Ctrl+C", "quit"),
 ];
@@ -106,6 +107,7 @@ impl App {
 
         if matches!(&self.mode, Mode::Read(_)) {
             self.draw_reader(frame, content_area);
+            self.draw_syntax_picker(frame, content_area);
         } else {
             let input_height = match &self.mode {
                 Mode::Create { .. } => 4,
@@ -250,6 +252,12 @@ impl App {
             Mode::ConfirmDelete { .. } => &[
                 ("Left/Right", "choose"),
                 ("Enter", "confirm"),
+                ("Esc", "cancel"),
+                ("Ctrl+C", "quit"),
+            ],
+            Mode::Read(reader) if reader.syntax_picker.is_some() => &[
+                ("Up/Down", "choose"),
+                ("Enter", "apply"),
                 ("Esc", "cancel"),
                 ("Ctrl+C", "quit"),
             ],

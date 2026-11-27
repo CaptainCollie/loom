@@ -1,6 +1,6 @@
 // Name glyphs adapted from lsd (Apache-2.0), pinned source:
 // https://github.com/lsd-rs/lsd/blob/4b6c14a110fe0fd544ec0204501b5fd3a5d6218f/src/theme/icon.rs
-// License: assets/icon-themes/lsd-LICENSE.
+// License: Apache-2.0 (https://github.com/lsd-rs/lsd/blob/master/LICENSE).
 
 static ICONS_BY_NAME: &[(&str, char)] = &[
     (".Xauthority", '\u{e615}'),

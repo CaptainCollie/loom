@@ -3,6 +3,7 @@ mod icons;
 mod input;
 mod reader;
 mod svg_color;
+mod syntax_picker;
 mod theme;
 mod theme_picker;
 mod theme_store;
@@ -39,6 +40,7 @@ pub(crate) struct App {
     theme_store: ThemeStore,
     icon_theme: IconTheme,
     selected_theme: Option<ThemeId>,
+    syntax_catalog: Option<syntax_picker::Catalog>,
 }
 
 #[derive(Debug)]
@@ -84,6 +86,7 @@ impl App {
             theme_store: themes.store,
             icon_theme: themes.theme,
             selected_theme: themes.selected,
+            syntax_catalog: None,
         };
         app.rebuild_visible()?;
         Ok(app)
@@ -422,6 +425,12 @@ impl App {
 
     fn exit(&mut self) {
         self.theme_store.cancel();
+        if let Some(catalog) = &self.syntax_catalog {
+            catalog.cancel();
+        }
+        if let Mode::Read(reader) = &mut self.mode {
+            reader.viewer.cancel();
+        }
         self.exit = true;
     }
 }
